@@ -83,7 +83,7 @@ const supabase=createClient('https://dnlgvtpvooaqvxnobmho.supabase.co','sb_publi
 const qs=s=>document.querySelector(s);
 const tabs=[['dashboard','Resumen'],['movements','Movimientos'],['liabilities','Pasivos'],['assets','Activos'],['accounts','Cuentas'],['receipts','Comprobantes']];
 const mobileTabs=[['dashboard','Resumen'],['movements','Movimientos'],['accounts','Cuentas'],['more','Más']];
-let user=null,tab='dashboard',state={accounts:[],transactions:[],liabilities:[],assets:[],receipts:[]};
+let user=null,tab='dashboard',loadToken=0,state={accounts:[],transactions:[],liabilities:[],assets:[],receipts:[]};
 const money=(n,c='UYU')=>new Intl.NumberFormat('es-UY',{style:'currency',currency:c,maximumFractionDigits:2}).format(Number(n||0));
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function setAuth(on){
@@ -93,18 +93,47 @@ function setAuth(on){
   qs('#mobileAdd').classList.toggle('hidden',on);
 }
 async function load(){
- const res=await Promise.all([
-  supabase.from('accounts').select('*').order('created_at'),
-  supabase.from('transactions').select('*').order('transaction_date',{ascending:false}).order('created_at',{ascending:false}),
-  supabase.from('liabilities').select('*').order('created_at',{ascending:false}),
-  supabase.from('assets').select('*').order('created_at',{ascending:false}),
-  supabase.from('receipts').select('*').order('created_at',{ascending:false})
- ]);
- const err=res.find(x=>x.error);if(err){alert(err.error.message);return}
- state.accounts=res[0].data||[];state.transactions=res[1].data||[];state.liabilities=res[2].data||[];state.assets=res[3].data||[];state.receipts=res[4].data||[];
- if(!state.accounts.length){await supabase.from('accounts').insert([{user_id:user.id,name:'Efectivo',type:'cash',currency:'UYU',initial_balance:0},{user_id:user.id,name:'Cuenta bancaria',type:'bank',currency:'UYU',initial_balance:0}]);return load()}
- for(const r of state.receipts){const x=await supabase.storage.from('receipts').createSignedUrl(r.storage_path,3600);r.image=x.data?.signedUrl||''}
- render();
+ const token=++loadToken;
+ const view=qs('#view');
+ if(view&&!view.innerHTML.trim())view.innerHTML='<div class="empty">Cargando información...</div>';
+ try{
+  const res=await Promise.all([
+   supabase.from('accounts').select('*').order('created_at'),
+   supabase.from('transactions').select('*').order('transaction_date',{ascending:false}).order('created_at',{ascending:false}),
+   supabase.from('liabilities').select('*').order('created_at',{ascending:false}),
+   supabase.from('assets').select('*').order('created_at',{ascending:false}),
+   supabase.from('receipts').select('*').order('created_at',{ascending:false})
+  ]);
+  if(token!==loadToken)return;
+  const err=res.find(x=>x.error);
+  if(err)throw err.error;
+  state.accounts=res[0].data||[];
+  state.transactions=res[1].data||[];
+  state.liabilities=res[2].data||[];
+  state.assets=res[3].data||[];
+  state.receipts=res[4].data||[];
+  if(!state.accounts.length){
+   const created=await supabase.from('accounts').insert([
+    {user_id:user.id,name:'Efectivo',type:'cash',currency:'UYU',initial_balance:0},
+    {user_id:user.id,name:'Cuenta bancaria',type:'bank',currency:'UYU',initial_balance:0}
+   ]);
+   if(created.error)throw created.error;
+   return load();
+  }
+  await Promise.all(state.receipts.map(async r=>{
+   try{
+    const x=await supabase.storage.from('receipts').createSignedUrl(r.storage_path,3600);
+    r.image=x.data?.signedUrl||'';
+   }catch(_e){r.image=''}
+  }));
+  if(token!==loadToken)return;
+  render();
+ }catch(error){
+  console.error('Error cargando datos',error);
+  if(token!==loadToken)return;
+  if(view)view.innerHTML='<div class="empty"><b>No pudimos cargar tus datos.</b><br><br><button class="btn primary" id="retryLoad">Reintentar</button></div>';
+  setTimeout(()=>{const b=qs('#retryLoad');if(b)b.onclick=()=>load()},0);
+ }
 }
 function metrics(){
  const now=new Date(),ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
@@ -188,8 +217,15 @@ qs('#signup').onclick=async()=>{const email=qs('#email').value.trim(),password=q
 qs('#logout').onclick=()=>supabase.auth.signOut();
 qs('#newMove').onclick=()=>openModal('transaction');
 qs('#mobileAdd').onclick=()=>openModal('transaction');
-supabase.auth.onAuthStateChange(async(_e,s)=>{user=s?.user||null;setAuth(!user);if(user)await load()});
-const current=await supabase.auth.getSession();user=current.data.session?.user||null;setAuth(!user);if(user)await load();
+supabase.auth.onAuthStateChange((_e,s)=>{
+ user=s?.user||null;
+ setAuth(!user);
+ if(user)setTimeout(()=>load(),0);
+});
+const current=await supabase.auth.getSession();
+user=current.data.session?.user||null;
+setAuth(!user);
+if(user)await load();
 if('serviceWorker' in navigator){
  let refreshing=false,registration=null;
  const showUpdate=reg=>{
