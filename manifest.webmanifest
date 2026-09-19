@@ -1,0 +1,14 @@
+{
+  "name": "Control Financiero",
+  "short_name": "Finanzas",
+  "description": "Control personal de ingresos, gastos, activos y pasivos.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f2",
+  "theme_color": "#161817",
+  "lang": "es-UY",
+  "icons": [
+    {"src":"/icon-192.png","sizes":"192x192","type":"image/png"},
+    {"src":"/icon-512.png","sizes":"512x512","type":"image/png"}
+  ]
+}
