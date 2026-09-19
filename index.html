@@ -83,7 +83,7 @@ const supabase=createClient('https://dnlgvtpvooaqvxnobmho.supabase.co','sb_publi
 const qs=s=>document.querySelector(s);
 const tabs=[['dashboard','Resumen'],['movements','Movimientos'],['liabilities','Pasivos'],['assets','Activos'],['accounts','Cuentas'],['receipts','Comprobantes']];
 const mobileTabs=[['dashboard','Resumen'],['movements','Movimientos'],['accounts','Cuentas'],['more','Más']];
-let user=null,tab='dashboard',loadToken=0,state={accounts:[],transactions:[],liabilities:[],assets:[],receipts:[]};
+let user=null,tab='dashboard',loadToken=0,state={accounts:[],transactions:[],liabilities:[],assets:[],receipts:[],settings:null};
 const money=(n,c='UYU')=>new Intl.NumberFormat('es-UY',{style:'currency',currency:c,maximumFractionDigits:2}).format(Number(n||0));
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function setAuth(on){
@@ -102,7 +102,8 @@ async function load(){
    supabase.from('transactions').select('*').order('transaction_date',{ascending:false}).order('created_at',{ascending:false}),
    supabase.from('liabilities').select('*').order('created_at',{ascending:false}),
    supabase.from('assets').select('*').order('created_at',{ascending:false}),
-   supabase.from('receipts').select('*').order('created_at',{ascending:false})
+   supabase.from('receipts').select('*').order('created_at',{ascending:false}),
+  supabase.from('finance_settings').select('*').maybeSingle()
   ]);
   if(token!==loadToken)return;
   const err=res.find(x=>x.error);
@@ -112,6 +113,7 @@ async function load(){
   state.liabilities=res[2].data||[];
   state.assets=res[3].data||[];
   state.receipts=res[4].data||[];
+  state.settings=res[5].data||null;
   if(!state.accounts.length){
    const created=await supabase.from('accounts').insert([
     {user_id:user.id,name:'Efectivo',type:'cash',currency:'UYU',initial_balance:0},
@@ -137,14 +139,24 @@ async function load(){
 }
 function metrics(){
  const now=new Date(),ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+ const rate=Number(state.settings?.usd_to_uyu_rate||0);
+ const toUYU=(amount,currency)=>{
+  const n=Number(amount||0);
+  if(currency==='UYU')return n;
+  if(currency==='USD')return rate>0?n*rate:null;
+  return null;
+ };
  const tx=state.transactions.filter(x=>x.transaction_date&&x.transaction_date.startsWith(ym));
- const income=tx.filter(x=>x.type==='income').reduce((s,x)=>s+Number(x.amount||0),0);
- const expenses=tx.filter(x=>x.type==='expense').reduce((s,x)=>s+Number(x.amount||0),0);
- const accounts=state.accounts.map(a=>Object.assign({},a,{balance:Number(a.initial_balance||0)+state.transactions.filter(t=>t.account_id===a.id).reduce((s,t)=>s+(t.type==='income'?Number(t.amount||0):t.type==='expense'?-Number(t.amount||0):0),0)}));
- const cash=accounts.reduce((s,a)=>s+a.balance,0);
- const assets=cash+state.assets.reduce((s,a)=>s+Number(a.value||0),0);
- const liabilities=state.liabilities.reduce((s,a)=>s+Number(a.remaining_amount||0),0);
- return{income,expenses,flow:income-expenses,accounts,cash,assets,liabilities,net:assets-liabilities};
+ const income=tx.filter(x=>x.type==='income').reduce((s,x)=>{const v=toUYU(x.amount,x.currency);return s+(v??0)},0);
+ const expenses=tx.filter(x=>x.type==='expense').reduce((s,x)=>{const v=toUYU(x.amount,x.currency);return s+(v??0)},0);
+ const accounts=state.accounts.map(a=>Object.assign({},a,{balance:Number(a.initial_balance||0)+state.transactions.filter(t=>t.account_id===a.id&&t.currency===a.currency).reduce((s,t)=>s+(t.type==='income'?Number(t.amount||0):t.type==='expense'?-Number(t.amount||0):0),0)}));
+ const cashUYU=accounts.reduce((s,a)=>{const v=toUYU(a.balance,a.currency);return s+(v??0)},0);
+ const assetsUYU=cashUYU+state.assets.reduce((s,a)=>{const v=toUYU(a.value,a.currency);return s+(v??0)},0);
+ const liabilitiesUYU=state.liabilities.reduce((s,a)=>{const v=toUYU(a.remaining_amount,a.currency);return s+(v??0)},0);
+ const usdAssets=state.assets.filter(a=>a.currency==='USD').reduce((s,a)=>s+Number(a.value||0),0);
+ const usdLiabilities=state.liabilities.filter(a=>a.currency==='USD').reduce((s,a)=>s+Number(a.remaining_amount||0),0);
+ const hasUSD=state.accounts.some(a=>a.currency==='USD')||state.transactions.some(t=>t.currency==='USD')||usdAssets>0||usdLiabilities>0;
+ return{income,expenses,flow:income-expenses,accounts,cash:cashUYU,assets:assetsUYU,liabilities:liabilitiesUYU,net:assetsUYU-liabilitiesUYU,rate,hasUSD,usdAssets,usdLiabilities};
 }
 function nav(){
  const desktop=tabs.map(x=>'<button data-tab="'+x[0]+'" class="'+(tab===x[0]?'active':'')+'"><span>'+x[1]+'</span></button>').join('');
@@ -184,6 +196,7 @@ function bind(){
  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('¿Eliminar este registro?'))return;const e=await supabase.from(b.dataset.del).delete().eq('id',b.dataset.id);if(e.error)alert(e.error.message);else load()});
  document.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>openModal(b.dataset.add));
  document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{tab=b.dataset.go;render()});
+ const fx=qs('#fxSettings');if(fx)fx.onclick=()=>openFxSettings();
  const cam=qs('#takeReceipt'),gal=qs('#pickReceipt');
  if(cam){
   cam.onclick=()=>qs('#cameraFile').click();
@@ -194,7 +207,9 @@ function bind(){
 }
 function render(){
  nav();const m=metrics();qs('#title').textContent=tabs.find(x=>x[0]===tab)[1];let h='';
- if(tab==='dashboard')h='<div class="cards"><div class="card"><span>Disponible</span><b>'+money(m.cash)+'</b></div><div class="card"><span>Ingresos mes</span><b>'+money(m.income)+'</b></div><div class="card"><span>Gastos mes</span><b>'+money(m.expenses)+'</b></div><div class="card dark"><span>Patrimonio neto</span><b>'+money(m.net)+'</b></div></div><div class="grid2"><section class="panel"><div class="panel-head"><h2>Flujo mensual</h2><b class="'+(m.flow>=0?'green':'red')+'">'+money(m.flow)+'</b></div><div class="entity"><span>Ingresos</span><b>'+money(m.income)+'</b></div><div class="entity"><span>Gastos</span><b>'+money(m.expenses)+'</b></div></section><section class="panel"><div class="panel-head"><h2>Patrimonio</h2></div><div class="entity"><span>Activos</span><b>'+money(m.assets)+'</b></div><div class="entity"><span>Pasivos</span><b>'+money(m.liabilities)+'</b></div></section></div><section class="panel"><div class="panel-head"><h2>Últimos movimientos</h2><button class="btn secondary" data-go="movements">Ver todos</button></div>'+txRows(state.transactions.slice(0,6))+'</section>';
+ if(tab==='dashboard')h='<div class="cards"><div class="card"><span>Disponible estimado</span><b>'+money(m.cash)+'</b></div><div class="card"><span>Ingresos mes</span><b>'+money(m.income)+'</b></div><div class="card"><span>Gastos mes</span><b>'+money(m.expenses)+'</b></div><div class="card dark"><span>Patrimonio neto estimado</span><b>'+money(m.net)+'</b></div></div>'+
+ (m.hasUSD?'<section class="panel"><div class="panel-head"><h2>Conversión de moneda</h2></div><div class="entity"><div><b>USD → UYU</b><small>'+(m.rate>0?'1 USD = '+m.rate.toLocaleString('es-UY',{maximumFractionDigits:4})+' UYU':'Falta configurar el tipo de cambio')+'</small></div><button class="btn secondary" id="fxSettings">'+(m.rate>0?'Editar':'Configurar')+'</button></div>'+(m.usdAssets?'<div class="entity"><span>Activos en USD</span><b>'+money(m.usdAssets,'USD')+'</b></div>':'')+(m.usdLiabilities?'<div class="entity"><span>Pasivos en USD</span><b>'+money(m.usdLiabilities,'USD')+'</b></div>':'')+'</section>':'')+
+ '<div class="grid2"><section class="panel"><div class="panel-head"><h2>Flujo mensual</h2><b class="'+(m.flow>=0?'green':'red')+'">'+money(m.flow)+'</b></div><div class="entity"><span>Ingresos</span><b>'+money(m.income)+'</b></div><div class="entity"><span>Gastos</span><b>'+money(m.expenses)+'</b></div></section><section class="panel"><div class="panel-head"><h2>Patrimonio</h2></div><div class="entity"><span>Activos</span><b>'+money(m.assets)+'</b></div><div class="entity"><span>Pasivos</span><b>'+money(m.liabilities)+'</b></div></section></div><section class="panel"><div class="panel-head"><h2>Últimos movimientos</h2><button class="btn secondary" data-go="movements">Ver todos</button></div>'+txRows(state.transactions.slice(0,6))+'</section>';
  if(tab==='movements')h='<section class="panel"><div class="panel-head"><h2>Movimientos</h2><button class="btn secondary" data-add="transaction">+ Agregar</button></div>'+txRows(state.transactions)+'</section>';
  if(tab==='liabilities')h='<section class="panel"><div class="panel-head"><h2>Pasivos</h2><button class="btn secondary" data-add="liability">+ Agregar</button></div>'+entityRows('liabilities')+'</section>';
  if(tab==='assets')h='<section class="panel"><div class="panel-head"><h2>Activos</h2><button class="btn secondary" data-add="asset">+ Agregar</button></div>'+entityRows('assets')+'</section>';
@@ -203,6 +218,19 @@ function render(){
  qs('#view').innerHTML=h;bind();
 }
 function field(label,html){return '<label class="field"><span>'+label+'</span>'+html+'</label>'}
+function openFxSettings(){
+ const current=state.settings?.usd_to_uyu_rate||'';
+ qs('#modal').innerHTML='<div class="drawer"><div class="modal"><div class="modal-head"><h2>Tipo de cambio</h2><button id="close" class="close">✕</button></div><form id="fxForm" class="form">'+field('1 USD equivale a','<input name="rate" inputmode="decimal" type="number" min="0.0001" step="0.0001" value="'+current+'" placeholder="Ej. 42,50" required>')+'<div class="notice">Este valor se usa solo para estimar tus totales en pesos. Los registros originales siguen guardados en su moneda.</div><button class="btn primary" type="submit">Guardar tipo de cambio</button></form></div></div>';
+ qs('#close').onclick=()=>qs('#modal').innerHTML='';
+ qs('#fxForm').onsubmit=async e=>{
+  e.preventDefault();
+  const rate=Number(new FormData(e.target).get('rate'));
+  if(!rate||rate<=0)return;
+  const payload={user_id:user.id,base_currency:'UYU',usd_to_uyu_rate:rate,updated_at:new Date().toISOString()};
+  const x=await supabase.from('finance_settings').upsert(payload,{onConflict:'user_id'});
+  if(x.error)alert(x.error.message);else{qs('#modal').innerHTML='';load()}
+ };
+}
 function openMore(){
  qs('#modal').innerHTML='<div class="drawer"><div class="modal"><div class="modal-head"><h2>Más opciones</h2><button id="close" class="close">✕</button></div><div class="more-sheet"><button data-more="liabilities">Pasivos</button><button data-more="assets">Activos</button><button data-more="receipts">Comprobantes</button><button id="mobileLogout">Cerrar sesión</button></div></div></div>';
  qs('#close').onclick=()=>qs('#modal').innerHTML='';
